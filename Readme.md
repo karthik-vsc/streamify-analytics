@@ -130,5 +130,3 @@ docker exec -it streamify-kafka /opt/kafka/bin/kafka-console-consumer.sh \
 - [x] Phase 3b: Faust stream processor
 - [x] Phase 5: Kafka Connect → PostgreSQL + ClickHouse
 - [x] Phase 6: Prometheus + Grafana observability
-- [ ] Phase 7: React dashboard (coming soon)
-- [ ] Phase 8: Kubernetes + cloud deployment (coming soon)
