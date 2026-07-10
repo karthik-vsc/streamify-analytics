@@ -1,0 +1,6 @@
+faust-streaming==0.11.3
+aiokafka>=0.10.0,<0.11.0
+confluent-kafka[avro,schemaregistry]==2.4.0
+aiohttp==3.9.5
+python-snappy==0.7.3
+prometheus_client>=0.20.0

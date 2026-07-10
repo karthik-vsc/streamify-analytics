@@ -1,0 +1,21 @@
+@app.post("/produce/single", summary="Produce one event manually (good for testing)")
+async def produce_single(user_id: str | None = None, event_type: str | None = None):
+    """Lets you fire a single hand-crafted event without running the full simulation."""
+    uid     = user_id or random.choice(USERS)
+    content = random.choice(CONTENT_CATALOGUE)
+    event   = make_event(uid, str(uuid.uuid4()), content)
+ 
+    if event_type:
+        valid = list(EVENT_WEIGHTS.keys())
+        if event_type.upper() not in valid:
+            raise HTTPException(400, f"event_type must be one of {valid}")
+        event["event_type"] = event_type.upper()
+ 
+    producer.produce(
+        topic=config.KAFKA_TOPIC,
+        key=key_ser(uid, SerializationContext(config.KAFKA_TOPIC, MessageField.KEY)),
+        value=avro_ser(event, SerializationContext(config.KAFKA_TOPIC, MessageField.VALUE)),
+        on_delivery=on_delivery,
+    )
+    producer.flush()
+    return {"status": "produced", "event": event}

@@ -1,0 +1,39 @@
+{
+    "type":"record",
+    "name":"ContentMetadata",
+    "namespace":"com.streamify.analytics",
+    "doc": "Metadata for a piece of content in the Streamify catalogue",
+    "fields":[
+        {
+            "name":"content_id",
+            "type":"string",
+            "doc":"Unique content identifier — also the Kafka message key"
+        },
+        {
+            "name":"title",
+            "type":"string"
+        },
+        {
+            "name":"genre",
+            "type":{
+                "type":"enum",
+                "name":"Genre",
+                "symbols":["DRAMA", "THRILLER", "SCI_FI", "COMEDY", "DOCUMENTARY", "ACTION", "HORROR"]
+            }
+        },
+        {
+            "name":"release_year",
+            "type":"int"
+        },
+        {
+            "name":"duration_sec",
+            "type":"int",
+            "doc":"Total duration of the content in seconds"
+        },
+        {
+            "name": "maturity_rating",
+            "type": "string",
+            "doc": "e.g. PG, PG-13, R, TV-MA"
+        }
+    ]
+}

@@ -1,0 +1,277 @@
+version: '3.8'
+
+services:
+
+  # ─────────────────────────────────────────
+  # Kafka in KRaft mode (no Zookeeper)
+  # ─────────────────────────────────────────
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: streamify-kafka
+    ports:
+      - "9092:9092"   # external clients (your host machine)
+      - "9093:9093"   # controller
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_INTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # we create topics explicitly
+      KAFKA_LOG_RETENTION_HOURS: 168             # keep events for 7 days
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ─────────────────────────────────────────
+  # Confluent Schema Registry (free community)
+  # Enforces Avro schemas so producers and
+  # consumers never silently break each other
+  # ─────────────────────────────────────────
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    container_name: streamify-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────
+  # Topic initialiser — runs once, creates
+  # all Kafka topics, then exits
+  # ─────────────────────────────────────────
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: streamify-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo '--- Creating topics ---'
+        /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic viewing-events --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --config retention.ms=604800000
+        /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic content-metadata --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --config cleanup.policy=compact
+        /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic enriched-events --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic alerts --bootstrap-server kafka:29092 --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic viewing-events-dlq --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1
+        echo '--- Topics created ---'
+        /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server kafka:29092
+
+  # ─────────────────────────────────────────
+  # FastAPI producer — our Python service
+  # ─────────────────────────────────────────
+  producer:
+    build: ./producer
+    container_name: streamify-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KAFKA_TOPIC: viewing-events
+    volumes:
+      - ./producer:/app   # live-reload: code changes reflect immediately
+  
+  # ─────────────────────────────────────────
+  # Seeds content-metadata topic (runs once)
+  # ─────────────────────────────────────────
+  metadata-producer:
+    build: ./stream-processor
+    container_name: streamify-metadata-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    command: ["python", "metadata_producer.py"]
+
+  # ─────────────────────────────────────────
+  # Stream processor (runs continuously)
+  # ─────────────────────────────────────────
+  #stream-processor:
+    #build: ./stream-processor
+    #container_name: streamify-stream-processor
+    #depends_on:
+      #kafka:
+        #condition: service_healthy
+      #schema-registry:
+        #condition: service_healthy
+      #metadata-producer:
+        #condition: service_completed_successfully
+    #environment:
+      #KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      #SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    #volumes:
+      #- ./stream-processor:/app
+    #command: ["python", "processor.py"]
+
+# ─────────────────────────────────────────
+  # Faust stream processor (Phase 3b)
+  # ─────────────────────────────────────────
+  faust-processor:
+    build: ./faust-processor
+    container_name: streamify-faust-processor
+    ports:
+      - "6066:6066"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      metadata-producer:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    volumes:
+      - ./faust-processor:/app
+
+  # ─────────────────────────────────────────
+  # PostgreSQL — transactional storage
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: streamify-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: streamify
+      POSTGRES_USER: streamify
+      POSTGRES_PASSWORD: streamify
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streamify"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  # ─────────────────────────────────────────
+  # ClickHouse — analytical storage
+  # ─────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: streamify-clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # native interface
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  # ─────────────────────────────────────────
+  # Kafka Connect — sinks data to PostgreSQL
+  # and ClickHouse
+  # ─────────────────────────────────────────
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.6.0
+    container_name: streamify-kafka-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: streamify-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.converters.ByteArrayConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+    command:
+      - bash
+      - -c
+      - |
+        echo "Installing connectors..."
+        confluent-hub install --no-prompt confluentinc/kafka-connect-jdbc:10.7.4
+        confluent-hub install --no-prompt clickhouse/clickhouse-kafka-connect:latest
+        echo "Starting Kafka Connect..."
+        /etc/confluent/docker/run
+  #What Kafka Connect worker does:
+  #It's a long-running process that:
+  #Connects to Kafka as a consumer
+  #Exposes a REST API on port 8083
+  #Waits for connector configurations to be submitted via that REST API 
+  #When you submit a config, it starts a connector that reads from Kafka and writes to the target system
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - default
+    depends_on:
+      - faust-processor
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - default
+    depends_on:
+      - prometheus
+  adminer:
+    image: adminer:latest
+    container_name: streamify-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+volumes:
+  postgres-data:
+  clickhouse-data:
+  prometheus-data:
+  grafana-data:

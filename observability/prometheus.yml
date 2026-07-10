@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  
+scrape_configs:
+  - job_name: 'faust-processor'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['faust-processor:6066']
+        labels:
+          service: 'streamift-faust'

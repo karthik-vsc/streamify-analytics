@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Docker
+*.log
+
+# Kafka / Faust
+faust-data/
+kafka-streams/target/
+
+# Database volumes (never commit data)
+postgres-data/
+clickhouse-data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
